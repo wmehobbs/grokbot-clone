@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/readme-banner.svg" alt="Grokbot Clone — Your team. Their own computers." width="100%">
+  <img src="assets/readme-banner.svg" alt="Guild — Your team. Their own computers." width="100%">
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 
 Give a Bot a job, connect the apps it needs, and follow its work in chat. Each Bot has a name, a look, its own memory, and a desktop you can watch or take over. Bots can work together, run recurring tasks, and talk with you over voice.
 
-Grokbot Clone recreates the Grok Bot experience with a runtime you can run and modify yourself. You bring your own API keys; conversations, settings, and agent state live in a local SQLite database.
+Guild recreates the Grok Bot experience with a runtime you can run and modify yourself. You bring your own API keys; conversations, settings, and agent state live in a local SQLite database.
 
 ## What you can do
 
@@ -41,7 +41,7 @@ Install **Node.js 22.22 or newer**, then:
 
 ```bash
 git clone https://github.com/nickvasilescu/grokbot-clone.git
-cd grokbot-clone
+cd guild
 npm ci
 cp .env.example .env
 ```

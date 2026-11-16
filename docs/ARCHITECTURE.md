@@ -1,6 +1,6 @@
 # Architecture
 
-grokbot-clone is a web app (`web/`) plus a Node server (`server/`) that runs every Bot's agent loop. The model is Grok 4.7 through the xAI Responses API. Each user's Bots act on one Orgo cloud computer and use apps connected through Composio.
+guild is a web app (`web/`) plus a Node server (`server/`) that runs every Bot's agent loop. The model is Grok 4.7 through the xAI Responses API. Each user's Bots act on one Orgo cloud computer and use apps connected through Composio.
 
 ## Components
 
@@ -53,7 +53,7 @@ The loop checks policy before executing each tool call:
 
 ## Data
 
-SQLite (`data/grokbot.db`, WAL) holds:
+SQLite (`data/guild.db`, WAL) holds:
 - users and sessions
 - Bots, rows, model history
 - approvals, policies

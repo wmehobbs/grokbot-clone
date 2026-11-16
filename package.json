@@ -1,7 +1,7 @@
 {
-  "name": "grokbot",
+  "name": "guild",
   "private": true,
-  "description": "Grokbot: internal reverse-engineering clone of xAI Grok Bot. Internal research use only; do not distribute.",
+  "description": "Guild: internal reverse-engineering clone of xAI Grok Bot. Internal research use only; do not distribute.",
   "workspaces": ["server", "web"],
   "scripts": {
     "dev": "npm run dev -w server & npm run dev -w web",
