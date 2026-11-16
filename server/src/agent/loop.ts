@@ -1,17 +1,24 @@
-import OpenAI from 'openai';
 import { db, now } from '../db.js';
 import { env } from '../env.js';
 import { newId, sha256 } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { appendHistory, appendRow, emitBot, getBotRow, getRow, loadHistory, setLive, updateRow } from '../store.js';
-import type { MessageBody, ToolCallBody } from '../types.js';
+import type { ActivityKind, MessageBody, ToolCallBody } from '../types.js';
 import { composioTools, toolkitInfo } from '../composio.js';
 import { systemPrompt } from './prompt.js';
 import { repairHistory } from './history.js';
 import { maybeCompact, noteUsage } from './memory.js';
 import { activityFor, functionSchemas, humanizeSlug, policyFor, runComposioTool, toolMap, type ToolCtx, type ToolResult } from './tools.js';
+import { providerFor, resilientStream } from '../llm/index.js';
+import type { ProviderCall, ToolSpec } from '../llm/types.js';
 
-const xai = new OpenAI({ apiKey: env.xaiKey, baseURL: 'https://api.x.ai/v1', timeout: 360_000 });
+/** Normalise a tool definition (ours or Composio's) into the flat shape. */
+function toToolSpec(t: any): ToolSpec | null {
+  if (!t || t.type !== 'function') return null;
+  const fn = t.function ?? t;
+  if (!fn.name) return null;
+  return { type: 'function', name: String(fn.name), description: String(fn.description ?? ''), parameters: fn.parameters ?? { type: 'object', properties: {} } };
+}
 
 export type Trigger =
   | { type: 'user'; text: string }
@@ -90,7 +97,7 @@ function triggerItem(t: Trigger): any | null {
   switch (t.type) {
     case 'user': return { role: 'user', content: t.text };
     case 'routine': return { role: 'user', content: `[Routine "${t.name}" is running now. Do this:]\n${t.prompt}` };
-    case 'bot': return { role: 'user', content: `[Message from ${t.fromName}, another Bot on the team. Reply to them with send_to_bot if they asked you something.]\n${t.text}` };
+    case 'bot': return { role: 'user', content: `[Message from ${t.fromName}, another Bot on the team. This is the answer to something you asked for: report it to the user and stop. Only use send_to_bot if you still need something from them - never reply just to acknowledge.]` + '\n' + t.text };
     case 'system': return { role: 'user', content: `[System notice] ${t.text}` };
     case 'resume': return null;
   }
@@ -127,16 +134,9 @@ async function runTurn(botId: string, trigger: Trigger) {
       if (item) appendHistory(botId, [item]);
     }
 
-    const tools = [
-      ...functionSchemas(),
-      ...(await composioTools(userId)),
-      { type: 'web_search' },
-      { type: 'x_search' },
-    ];
-
     for (let step = 0; step < MAX_STEPS; step++) {
       if (ctrl.signal.aborted) throw new Error('interrupted');
-      const result = await callModel(ctx, tools, ctrl.signal);
+      const result = await callModel(ctx, ctrl.signal);
       appendHistory(botId, result.output);
       const calls = result.output.filter((o: any) => o.type === 'function_call');
       if (!calls.length) break;
@@ -251,42 +251,34 @@ async function finishPending(ctx: ToolCtx, st: PendingState, _reason: string) {
 
 // ---------- model call with streaming into a message row ----------
 
-async function callModel(ctx: ToolCtx, tools: any[], signal: AbortSignal): Promise<{ output: any[] }> {
+async function callModel(ctx: ToolCtx, signal: AbortSignal): Promise<{ output: any[] }> {
   const { botId, userId } = ctx;
   const bot = getBotRow(botId);
   // Runs inside the bot's serial queue, so compaction can't race a turn.
   const history = await maybeCompact(botId, loadHistory(botId)).catch(() => loadHistory(botId));
   // The model is only called when no approval is pending, so every orphaned call can be repaired.
-  const input = [{ role: 'system', content: await systemPrompt(userId, botId) }, ...pruneImages(repairHistory(history))];
+  const items = pruneImages(repairHistory(history));
 
-  const body: any = {
-    model: env.xaiModel,
-    input,
-    tools,
-    reasoning: { effort: bot.effort ?? 'medium' },
-    store: false,
-    include: ['reasoning.encrypted_content'],
-    prompt_cache_key: `guild:${botId}:${bot.generation}`,
-    safety_identifier: sha256(userId).slice(0, 32),
-    stream: true,
+  const choice = providerFor(bot);
+  const own = functionSchemas().map((t: any) => toToolSpec(t)!);
+  const composio = (await composioTools(userId)).map(toToolSpec).filter((t): t is ToolSpec => !!t);
+  const allTools = [...own, ...composio];
+
+  const call: ProviderCall = {
+    model: choice.model,
+    system: await systemPrompt(userId, botId),
+    items,
+    tools: allTools,
+    effort: bot.effort ?? 'medium',
+    promptCacheKey: `guild:${botId}:${bot.generation}`,
+    safetyIdentifier: sha256(userId).slice(0, 32),
+    signal,
   };
-
-  let stream: any;
-  try {
-    stream = await xai.responses.create(body, { signal });
-  } catch (e: any) {
-    // If a Composio tool schema is rejected, retry with only our own tools.
-    if (e?.status === 400 && tools.length > functionSchemas().length + 2) {
-      console.warn('[agent] 400 with composio tools, retrying without:', e?.message);
-      body.tools = [...functionSchemas(), { type: 'web_search' }, { type: 'x_search' }];
-      stream = await xai.responses.create(body, { signal });
-    } else throw e;
-  }
 
   let msgSeq: number | null = null;
   let text = '';
   let lastFlush = 0;
-  let final: any = null;
+  let usage: { input: number; output: number } | null = null;
   const flush = (streaming: boolean) => {
     const b: MessageBody = { type: 'message', role: 'assistant', text, streaming };
     if (msgSeq === null) msgSeq = appendRow(botId, 'message', b).seq;
@@ -294,40 +286,58 @@ async function callModel(ctx: ToolCtx, tools: any[], signal: AbortSignal): Promi
     lastFlush = Date.now();
   };
 
-  for await (const ev of stream as AsyncIterable<any>) {
-    switch (ev.type) {
-      case 'response.output_text.delta':
-        text += ev.delta;
-        if (msgSeq === null || Date.now() - lastFlush > 120) flush(true);
-        break;
-      case 'response.output_item.added':
-        if (ev.item?.type === 'web_search_call') setLive(botId, { activity: { kind: 'searching_web', since: now() } });
-        if (ev.item?.type === 'x_search_call') setLive(botId, { activity: { kind: 'searching_web', detail: 'X', since: now() } });
-        if (ev.item?.type === 'message') setLive(botId, { activity: { kind: 'working', since: now() } });
-        break;
-      case 'response.output_item.done':
-        if (ev.item?.type === 'message' && msgSeq !== null) {
-          // finalize this message; a later message in the same response gets its own row
-          const citations = (ev.item.content ?? []).flatMap((c: any) => (c.annotations ?? []).filter((a: any) => a.url).map((a: any) => ({ url: a.url, title: a.title })));
-          updateRow(botId, msgSeq, { type: 'message', role: 'assistant', text, streaming: false, citations: citations.length ? citations : undefined });
-          db.prepare('UPDATE bots SET unread = unread + 1 WHERE id=?').run(botId);
-          msgSeq = null;
-          text = '';
-        }
-        break;
-      case 'response.completed':
-      case 'response.incomplete':
-        final = ev.response;
-        break;
-      case 'response.failed':
-      case 'error':
-        throw new Error(ev.response?.error?.message ?? ev.message ?? 'model error');
+  const consume = async (tools: ToolSpec[]): Promise<any[]> => {
+    const itemsOut: any[] = [];
+    for await (const ev of resilientStream(choice.provider, { ...call, tools })) {
+      switch (ev.kind) {
+        case 'text':
+          text += ev.delta;
+          if (msgSeq === null || Date.now() - lastFlush > 120) flush(true);
+          break;
+        case 'activity':
+          setLive(botId, { activity: { kind: ev.activity as ActivityKind, detail: ev.detail, since: now() } });
+          break;
+        case 'usage':
+          usage = { input: ev.inputTokens, output: ev.outputTokens };
+          break;
+        case 'finished':
+          itemsOut.push(...ev.items);
+          break;
+      }
+    }
+    return itemsOut;
+  };
+
+  let output: any[];
+  try {
+    output = await consume(allTools);
+  } catch (e: any) {
+    // A provider may reject one of the connected-app tool schemas; retry without them.
+    const status = e?.status ?? e?.response?.status;
+    if (status === 400 && composio.length && !text) {
+      console.warn('[agent] provider rejected connected-app tools, retrying without them:', e?.message);
+      output = await consume(own);
+    } else {
+      throw e;
     }
   }
-  if (msgSeq !== null) flush(false);
-  if (!final) throw new Error('model stream ended without a response');
-  if (final.usage?.input_tokens) noteUsage(botId, final.usage.input_tokens, history.length);
-  return { output: final.output ?? [] };
+
+  if (msgSeq !== null) {
+    flush(false);
+    const msgItem = output.find((o: any) => o?.type === 'message');
+    const citations = (msgItem?.content ?? []).flatMap((c: any) =>
+      (c?.annotations ?? []).filter((a: any) => a?.url).map((a: any) => ({ url: a.url, title: a.title })),
+    );
+    if (citations.length) {
+      const row = getRow(botId, msgSeq);
+      if (row) updateRow(botId, msgSeq, { ...(row.body as MessageBody), streaming: false, citations });
+    }
+    db.prepare('UPDATE bots SET unread = unread + 1 WHERE id=?').run(botId);
+  }
+  if (!output.length) throw new Error('model stream ended without a response');
+  const u = usage as { input: number; output: number } | null;
+  if (u?.input) noteUsage(botId, u.input, history.length);
+  return { output };
 }
 
 // ---------- misc ----------

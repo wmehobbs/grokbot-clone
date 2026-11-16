@@ -1,13 +1,18 @@
 {
   "name": "guild",
   "private": true,
-  "description": "Guild: internal reverse-engineering clone of xAI Grok Bot. Internal research use only; do not distribute.",
-  "workspaces": ["server", "web"],
+  "description": "Guild: always-on AI teammates. A Guildmaster, a shop of specialists, your own machines, and your choice of API.",
+  "workspaces": [
+    "server",
+    "web"
+  ],
   "scripts": {
     "dev": "npm run dev -w server & npm run dev -w web",
     "build": "npm run build -w web && npm run build -w server",
     "start": "npm run start -w server",
     "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=24"
+  }
 }

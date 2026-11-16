@@ -355,12 +355,18 @@ voiceApi.post('/tool', async (c) => {
   }
 });
 
-const xai = new OpenAI({ apiKey: env.xaiKey, baseURL: XAI, timeout: 45_000 });
+// Voice is an xAI feature; the client is built on demand so the app boots without an xAI key.
+function xaiClient() {
+  return new OpenAI({ apiKey: env.xaiKey ?? '', baseURL: XAI, timeout: 45_000 });
+}
+
+/** True when voice can work (it needs an xAI key). */
+export const voiceEnabled = !!env.xaiKey;
 
 async function summarizeCall(botName: string, transcript: { role: string; text: string }[], tasks: string[]): Promise<string | null> {
   if (!transcript.length && !tasks.length) return null;
   const lines = transcript.map((t) => `${t.role === 'user' ? 'User' : botName}: ${t.text}`).join('\n').slice(-12_000);
-  const res: any = await xai.responses.create({
+  const res: any = await xaiClient().responses.create({
     model: env.xaiModel,
     reasoning: { effort: 'low' },
     store: false,

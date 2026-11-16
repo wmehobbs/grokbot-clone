@@ -54,6 +54,19 @@ export function ConfirmButton({ children, confirmLabel = 'Delete', onConfirm, cl
   );
 }
 
+/** A labelled dropdown, used for picking a model provider and model. */
+export function Select({ label, value, options, onChange, disabled, id }: { label: string; value: string; options: { value: string; label: string }[]; onChange: (v: string) => void; disabled?: boolean; id?: string }) {
+  return (
+    <select id={id} className="cfg-select" aria-label={label} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function shortDate(ts: number): string {
   const d = new Date(ts);
   const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };

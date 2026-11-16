@@ -1,10 +1,10 @@
-import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { env } from './env.js';
+import { openDatabase } from './lib/sqlite.js';
 
 fs.mkdirSync(path.dirname(env.dbPath), { recursive: true });
-export const db = new Database(env.dbPath);
+export const db = openDatabase(env.dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
@@ -136,6 +136,28 @@ CREATE TABLE IF NOT EXISTS composio_sessions (
   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   session_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS machines (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT '',
+  capabilities TEXT NOT NULL DEFAULT '[]',
+  token_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'online',
+  last_seen_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS machine_jobs (
+  id TEXT PRIMARY KEY,
+  machine_id TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL DEFAULT '{}',
+  state TEXT NOT NULL DEFAULT 'pending',
+  result TEXT,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS machine_jobs_queue ON machine_jobs(machine_id, state);
 `);
 
 // Idempotent column migrations for tables that predate a column.
@@ -144,6 +166,9 @@ function addColumn(table: string, col: string, ddl: string) {
   if (!cols.some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`);
 }
 addColumn('bots', 'voice', "TEXT NOT NULL DEFAULT 'luna'");
+// Which model provider this Bot runs on ('' = the account default).
+addColumn('bots', 'provider', "TEXT NOT NULL DEFAULT ''");
+addColumn('bots', 'model', "TEXT NOT NULL DEFAULT ''");
 addColumn('bots', 'voice_speed', 'REAL NOT NULL DEFAULT 1');
 addColumn('bots', 'voice_language', "TEXT NOT NULL DEFAULT 'auto'");
 

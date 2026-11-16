@@ -80,6 +80,7 @@ configApi.post('/bots/:id/skills', async (c) => {
   if (!b) return c.json({ error: 'not found' }, 404);
   const s = cleanSkill(await c.req.json().catch(() => ({})));
   if (typeof s === 'string') return c.json({ error: s }, 400);
+  if (!s.name || !s.body) return c.json({ error: 'Give the skill a name and steps' }, 400);
   const id = newId('skl');
   db.prepare('INSERT INTO skills(id,bot_id,name,body,description,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run(id, b.id, s.name, s.body, s.description ?? '', now(), now());
   return c.json({ skill: toSkill(db.prepare('SELECT * FROM skills WHERE id=?').get(id)) });

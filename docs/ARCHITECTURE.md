@@ -1,21 +1,26 @@
 # Architecture
 
-guild is a web app (`web/`) plus a Node server (`server/`) that runs every Bot's agent loop. The model is Grok 4.7 through the xAI Responses API. Each user's Bots act on one Orgo cloud computer and use apps connected through Composio.
+Guild is a web app (`web/`) plus a Node server (`server/`) that runs every Bot's agent loop. Each Bot runs on a model provider of your choice - MiniMax, Anthropic, DeepSeek, OpenRouter, MiMo, Grok or anything OpenAI-compatible - and works on the computers you point it at: the machine running the server, other machines you have registered, and cloud-synced folders.
 
 ## Components
 
 | Piece | Where | What it does |
 |---|---|---|
 | API + realtime | `server/src/routes*.ts`, `lib/hub.ts` | JSON over HTTP, plus one Server-Sent Events stream per user (`GET /api/events`) carrying row updates, live state, roster changes and computer state |
-| Agent loop | `server/src/agent/loop.ts` | Per-Bot serial queue. Each turn builds the system prompt and history, streams `grok-4.7` with function tools plus server-side `web_search`/`x_search`, runs tool calls, and repeats until the model answers |
-| Tools | `server/src/agent/tools.ts` | Computer use (`computer_*`, `open_browser`, `shell`, `save_file`), memory (`remember`/`recall`), routines (cron and app events), tasks, `send_to_bot`, subagents, group chats, `ask_user`, `request_app_connection`, `stay_silent`, plus Composio's meta tools for 1,000+ apps |
-| Memory | `server/src/agent/memory.ts`, `agent/prompt.ts` | Compacts long histories with xAI `POST /v1/responses/compact` (falls back to a summary). Consolidates durable facts after a chat goes idle. Keeps a bounded memory section in the prompt |
-| Computers | `server/src/computer.ts`, `orgo.ts`, `idle.ts` | One Orgo Linux VM per user, with one Orgo *screen* (a separate X display with its own desktop) per Bot, up to 4, leased least-recently-used among idle Bots. Auto-suspends after 20 idle minutes and wakes on the next computer action |
-| Viewer | `server/src/vnc.ts` | WebSocket relay between the browser (noVNC) and Orgo's websockify. The server completes VNC auth upstream, so the VM password, which is root-equivalent, never reaches the browser. It then offers the browser an unauthenticated RFB session. In *watch* mode, keyboard, pointer and clipboard messages are dropped on the server |
-| Apps | `server/src/composio.ts`, `triggers.ts` | Catalog (`/api/v3.1/toolkits`), per-user sessions, connect links, tool execution, and triggers (realtime subscription) for event routines. Sign-in uses a Composio-managed Gmail connection and reads the profile email |
+| Agent loop | `server/src/agent/loop.ts` | Per-Bot serial queue. Each turn builds the system prompt and history, streams the Bot's model with function tools, runs tool calls, and repeats until the model answers |
+| Providers | `server/src/llm/` | One interface (`ProviderCall` in, `ProviderEvent` out) with an implementation per API family: `anthropic.ts` (Anthropic, MiniMax), `openai.ts` (OpenAI-compatible), `xai.ts` (Grok's Responses API, with hosted search), `mock.ts` (offline). `profiles.ts` builds the profiles from the environment; `translate.ts` maps the canonical transcript to each provider's shape |
+| Tools | `server/src/agent/tools.ts` | Memory (`remember`/`recall`), routines, tasks, `send_to_bot`, subagents, group chats, `ask_user`, `request_app_connection`, plus Composio's meta tools for 1,000+ apps |
+| Local machine | `server/src/agent/local.ts` | `local_read_file`, `local_write_file`, `local_list_dir`, `local_search`, `local_shell` on the machine running the server. Paths are resolved inside the allowed roots (`LOCAL_ROOTS` and the Bot's own workspace); writes and shell commands ask the user first |
+| Team | `server/src/agent/team.ts` | `manage_team` (list, spawn, assign, inspect, set role, retire) and `team_digest`. The Guildmaster (the primary Bot) uses them to run the team |
+| Machines | `server/src/machines.ts`, `server/src/agent/machine-tools.ts`, `machine-agent/agent.mjs` | A registry of your other computers. An agent on each machine registers with `MACHINE_TOKEN`, polls for jobs and runs them. Bots reach them with `machine_list`, `machine_run`, `machine_read_file`, `machine_write_file` |
+| Cloud | `server/src/agent/cloud.ts` | `cloud_sync` pushes a workspace into, or pulls it out of, a synced folder (`CLOUD_ROOT`), which is how work moves between computers |
+| Memory | `server/src/agent/memory.ts`, `agent/prompt.ts` | Compacts long histories (xAI's `/responses/compact` where available, otherwise a summary through the Bot's own provider). Consolidates durable facts after a chat goes idle. Keeps a bounded memory section in the prompt |
+| Cloud desktops | `server/src/computer.ts`, `orgo.ts`, `idle.ts` | Optional: one Orgo Linux VM per user, with one Orgo *screen* per Bot, leased least-recently-used among idle Bots. Auto-suspends after 20 idle minutes |
+| Viewer | `server/src/vnc.ts` | WebSocket relay between the browser (noVNC) and Orgo's websockify. The server completes VNC auth upstream, so the VM password never reaches the browser |
+| Apps | `server/src/composio.ts`, `triggers.ts` | Optional: catalog, per-user sessions, connect links, tool execution, and triggers for event routines |
 | Scheduling | `server/src/routines.ts`, `proactive.ts` | Cron routines (croner), event routines, and proactive check-ins for the primary Bot |
-| Voice | `server/src/voice.ts`, `web/src/voice/*` | Mints short-lived xAI realtime client secrets. The browser connects to `wss://api.x.ai/v1/realtime` directly. A small voice agent relays real work to the Bot's text loop (`send_task`) and speaks the result. Also proxies TTS (preview) and STT (dictation) |
-| UI | `web/src` | React + zustand. Sidebar, chat, details panel (activity, tasks, library), modals, settings, viewer, voice call bar |
+| Voice | `server/src/voice.ts`, `web/src/voice/*` | Optional: short-lived xAI realtime client secrets, with the browser talking to `wss://api.x.ai/v1/realtime` directly |
+| UI | `web/src` | React + zustand. Sidebar, chat, details panel (activity, tasks, library), modals, settings, viewer, voice call bar, and the per-Bot provider/model picker |
 
 ## Transcript model
 
@@ -60,13 +65,18 @@ SQLite (`data/guild.db`, WAL) holds:
 - routines, tasks, memories, skills
 - computers and screen leases
 - Composio session ids, compactions, check-in settings
+- registered machines and their job queue
 
 Secrets live only in `.env` on the server.
 
 ## External services
 
+Everything below is optional except a model provider.
+
 | Service | Used for | Notes |
 |---|---|---|
-| xAI | `grok-4.7` (Responses API), realtime voice, TTS, STT | `prompt_cache_key` per Bot and generation, `safety_identifier` from a hashed user id |
-| Orgo | VMs, screens, actions (screenshot, click, type, key, scroll, drag, bash), VNC, files | Rate limit is about 600 control calls/min per computer. An in-VM executor is the planned next step |
-| Composio | Sign-in, connectors, marketplace, triggers | Uses Composio-managed OAuth apps by default. Register your own OAuth clients for production branding |
+| Model providers | Every turn | MiniMax, Anthropic, DeepSeek, OpenRouter, MiMo, Grok, or any OpenAI-compatible server. Chosen per Bot |
+| Google Drive / OneDrive | Moving work between computers | Point `CLOUD_ROOT` at the synced folder; the `cloud_sync` tool pushes and pulls workspaces |
+| xAI | Voice, TTS, STT, and the hosted search tools when a Bot runs on Grok | Voice needs `XAI_API_KEY` |
+| Orgo | VMs, screens, actions (screenshot, click, type, key, scroll, drag, bash), VNC, files | Only if you want cloud desktops instead of your own machines |
+| Composio | Connected apps, triggers, sign-in | Only if you want 1,000+ app integrations |

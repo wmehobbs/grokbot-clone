@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { db, now } from './db.js';
 import { env } from './env.js';
+import { providerCatalog } from './llm/index.js';
 import { newId } from './lib/ids.js';
 import { hub } from './lib/hub.js';
 import { createSession, destroySession, requireUser, userFromCookieHeader, type AuthVars } from './lib/auth.js';
@@ -24,13 +25,13 @@ const COLORS: AvatarColor[] = ['black', 'brown', 'red', 'orange', 'yellow', 'gre
 function hashPick<T>(id: string, list: T[]): T {
   let h = 0x811c9dc5;
   for (const ch of id) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
-  return list[h % list.length];
+  return list[h % list.length] ?? (list[0] as T);
 }
 
 function createBot(userId: string, b: { name: string; label?: string; description?: string; instructions?: string; avatarShape?: string; avatarColor?: string; mode?: string; isPrimary?: boolean }) {
   const id = newId('bot');
-  const shape = SHAPES.includes(b.avatarShape as AvatarShape) ? b.avatarShape : hashPick(id, SHAPES.slice(0, 13));
-  const color = COLORS.includes(b.avatarColor as AvatarColor) ? b.avatarColor : hashPick(id, COLORS.filter((c) => c !== 'black'));
+  const shape = b.avatarShape && SHAPES.includes(b.avatarShape as AvatarShape) ? (b.avatarShape as AvatarShape) : hashPick(id, SHAPES.slice(0, 13));
+  const color = b.avatarColor && COLORS.includes(b.avatarColor as AvatarColor) ? (b.avatarColor as AvatarColor) : hashPick(id, COLORS.filter((c) => c !== 'black'));
   db.prepare(
     'INSERT INTO bots(id,user_id,name,label,description,instructions,avatar_shape,avatar_color,mode,is_primary,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
   ).run(id, userId, b.name.trim().slice(0, 60) || 'New Bot', b.label ?? '', b.description ?? '', b.instructions ?? '', shape, color, b.mode === 'teammate' ? 'teammate' : 'personal', b.isPrimary ? 1 : 0, now(), now());
@@ -130,6 +131,9 @@ const ownBot = (userId: string, id: string) => {
 
 api.get('/bots', (c) => c.json({ bots: listBots(c.get('user').id), live: allLive(c.get('user').id) }));
 
+/** Which model providers this install can use, and their models. */
+api.get('/providers', (c) => c.json({ providers: providerCatalog(), default: env.llmProvider || null }));
+
 api.post('/bots', async (c) => {
   const body = await c.req.json();
   return c.json({ bot: createBot(c.get('user').id, body) });
@@ -139,7 +143,7 @@ api.patch('/bots/:id', async (c) => {
   const b = ownBot(c.get('user').id, c.req.param('id'));
   if (!b) return c.json({ error: 'not found' }, 404);
   const p = await c.req.json();
-  const cols: Record<string, string> = { name: 'name', label: 'label', description: 'description', instructions: 'instructions', avatarShape: 'avatar_shape', avatarColor: 'avatar_color', mode: 'mode', effort: 'effort', pinned: 'pinned', voice: 'voice', voiceSpeed: 'voice_speed', voiceLanguage: 'voice_language' };
+  const cols: Record<string, string> = { name: 'name', label: 'label', description: 'description', instructions: 'instructions', avatarShape: 'avatar_shape', avatarColor: 'avatar_color', mode: 'mode', effort: 'effort', pinned: 'pinned', voice: 'voice', voiceSpeed: 'voice_speed', voiceLanguage: 'voice_language', provider: 'provider', model: 'model' };
   for (const [k, col] of Object.entries(cols)) {
     if (p[k] !== undefined) db.prepare(`UPDATE bots SET ${col}=?, updated_at=? WHERE id=?`).run(typeof p[k] === 'boolean' ? (p[k] ? 1 : 0) : p[k], now(), b.id);
   }

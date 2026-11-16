@@ -4,11 +4,25 @@ import { db } from './db.js';
 import { env } from './env.js';
 import type { Toolkit } from './types.js';
 
-export const composio = new Composio({ apiKey: env.composioKey, provider: new OpenAIResponsesProvider() });
+/**
+ * Connected apps are optional: without a Composio key the app runs without them.
+ * The SDK throws when constructed without a key, so it is built on first use.
+ */
+export const composioEnabled = !!env.composioKey;
+
+function createClient() {
+  return new Composio({ apiKey: env.composioKey ?? '', provider: new OpenAIResponsesProvider() });
+}
+
+let client: ReturnType<typeof createClient> | null = null;
+export function composio(): ReturnType<typeof createClient> {
+  if (!client) client = createClient();
+  return client;
+}
 
 const REST = 'https://backend.composio.dev/api/v3.1';
 async function rest<T = any>(path: string): Promise<T> {
-  const res = await fetch(`${REST}${path}`, { headers: { 'x-api-key': env.composioKey } });
+  const res = await fetch(`${REST}${path}`, { headers: { 'x-api-key': env.composioKey ?? '' } });
   if (!res.ok) throw new Error(`Composio ${path}: ${res.status} ${await res.text()}`);
   return res.json() as Promise<T>;
 }
@@ -19,6 +33,7 @@ type CatalogItem = Omit<Toolkit, 'connected'>;
 let catalogCache: { at: number; items: CatalogItem[] } | null = null;
 
 export async function catalog(): Promise<CatalogItem[]> {
+  if (!composioEnabled) return [];
   if (catalogCache && Date.now() - catalogCache.at < 3600_000) return catalogCache.items;
   const items: CatalogItem[] = [];
   let cursor: string | undefined;
@@ -49,19 +64,19 @@ export async function toolkitInfo(slug: string): Promise<CatalogItem | undefined
 // ---------- per-user connections ----------
 
 export async function connectedToolkits(userId: string): Promise<Set<string>> {
-  const r = await composio.connectedAccounts.list({ userIds: [userId], statuses: ['ACTIVE'] } as any);
+  const r = await composio().connectedAccounts.list({ userIds: [userId], statuses: ['ACTIVE'] } as any);
   const items: any[] = (r as any).items ?? [];
   return new Set(items.map((i) => i.toolkit?.slug ?? i.toolkitSlug).filter(Boolean));
 }
 
 export async function connectionsDetail(userId: string) {
-  const r = await composio.connectedAccounts.list({ userIds: [userId] } as any);
+  const r = await composio().connectedAccounts.list({ userIds: [userId] } as any);
   return ((r as any).items ?? []).map((i: any) => ({ id: i.id, toolkit: i.toolkit?.slug ?? i.toolkitSlug, status: i.status }));
 }
 
 export async function disconnect(userId: string, toolkit: string) {
   for (const c of await connectionsDetail(userId)) {
-    if (c.toolkit === toolkit) await composio.connectedAccounts.delete(c.id);
+    if (c.toolkit === toolkit) await composio().connectedAccounts.delete(c.id);
   }
   sessionCache.delete(userId);
 }
@@ -71,15 +86,16 @@ export async function disconnect(userId: string, toolkit: string) {
 const sessionCache = new Map<string, any>();
 
 export async function sessionFor(userId: string): Promise<any> {
+  if (!composioEnabled) throw new Error('Connected apps are not configured. Set COMPOSIO_API_KEY in .env.');
   const cached = sessionCache.get(userId);
   if (cached) return cached;
   const row = db.prepare('SELECT session_id FROM composio_sessions WHERE user_id=?').get(userId) as any;
   let session: any;
   if (row) {
-    try { session = await composio.use(row.session_id); } catch { session = null; }
+    try { session = await composio().use(row.session_id); } catch { session = null; }
   }
   if (!session) {
-    session = await composio.create(userId, { manageConnections: false } as any);
+    session = await composio().create(userId, { manageConnections: false } as any);
     db.prepare('INSERT OR REPLACE INTO composio_sessions(user_id, session_id) VALUES (?,?)').run(userId, session.sessionId);
   }
   sessionCache.set(userId, session);
@@ -127,13 +143,13 @@ export const isReadOnlySlug = (slug: string) => READ_RE.test(slug.toUpperCase())
 // ---------- sign-in via Composio-managed Google (Gmail) connection ----------
 
 export async function startGoogleLogin(provisionalUserId: string, callbackUrl: string) {
-  const session = await composio.create(provisionalUserId, { manageConnections: false } as any);
+  const session = await composio().create(provisionalUserId, { manageConnections: false } as any);
   const req = await (session as any).authorize('gmail', { callbackUrl });
   return { redirectUrl: req.redirectUrl as string, connectedAccountId: req.id as string | undefined };
 }
 
 export async function googleProfile(connectedAccountId: string): Promise<{ email: string; name?: string }> {
-  const r: any = await composio.tools.proxyExecute({
+  const r: any = await composio().tools.proxyExecute({
     endpoint: 'https://gmail.googleapis.com/gmail/v1/users/me/profile',
     method: 'GET',
     connectedAccountId,
@@ -145,5 +161,5 @@ export async function googleProfile(connectedAccountId: string): Promise<{ email
 }
 
 export async function deleteConnection(id: string) {
-  try { await composio.connectedAccounts.delete(id); } catch { /* ignore */ }
+  try { await composio().connectedAccounts.delete(id); } catch { /* ignore */ }
 }

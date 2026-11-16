@@ -9,6 +9,7 @@ import { Icon } from '../Icon';
 import { Modal } from '../modals/Modal';
 import { Glyph } from './glyphs';
 import { ConfirmButton, Field, Segmented, Switch, nextRunLabel, shortDate } from './ui';
+import { MODEL_HINT, ModelPicker } from './ModelPicker';
 
 const EFFORTS: { value: Bot['effort']; label: string }[] = [
   { value: 'low', label: 'Low' },
@@ -86,8 +87,8 @@ export function BotSettingsModal() {
 
 // ---------------------------------------------------------------------------
 
-type Draft = Pick<Bot, 'name' | 'label' | 'description' | 'instructions' | 'avatarShape' | 'avatarColor' | 'effort' | 'mode'>;
-const draftOf = (b: Bot): Draft => ({ name: b.name, label: b.label, description: b.description, instructions: b.instructions, avatarShape: b.avatarShape, avatarColor: b.avatarColor, effort: b.effort, mode: b.mode });
+type Draft = Pick<Bot, 'name' | 'label' | 'description' | 'instructions' | 'avatarShape' | 'avatarColor' | 'effort' | 'mode' | 'provider' | 'model'>;
+const draftOf = (b: Bot): Draft => ({ name: b.name, label: b.label, description: b.description, instructions: b.instructions, avatarShape: b.avatarShape, avatarColor: b.avatarColor, effort: b.effort, mode: b.mode, provider: b.provider ?? '', model: b.model ?? '' });
 
 function GeneralTab({ bot, onClose }: { bot: Bot; onClose: () => void }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(bot));
@@ -155,6 +156,9 @@ function GeneralTab({ bot, onClose }: { bot: Bot; onClose: () => void }) {
         </Field>
         <Field label="Used as">
           <Segmented label="Bot type" value={draft.mode} options={[{ value: 'personal', label: 'Personal assistant' }, { value: 'teammate', label: 'Teammate' }]} onChange={(v) => put('mode', v)} />
+        </Field>
+        <Field label="Model" hint={MODEL_HINT}>
+          <ModelPicker provider={draft.provider} model={draft.model} onChange={(p, m) => setDraft((d) => ({ ...d, provider: p, model: m }))} />
         </Field>
       </section>
 

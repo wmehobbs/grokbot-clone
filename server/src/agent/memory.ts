@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { db, now } from '../db.js';
 import '../db-config.js';
 import { env } from '../env.js';
+import { completeText } from '../llm/index.js';
 import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { getBotRow, getLive } from '../store.js';
@@ -13,22 +14,34 @@ import { getBotRow, getLive } from '../store.js';
  *  (c) a bounded, relevance-ranked memory section for the system prompt.
  */
 
-const xai = new OpenAI({ apiKey: env.xaiKey, baseURL: 'https://api.x.ai/v1', timeout: 300_000 });
+/**
+ * xAI is the only provider with a dedicated compaction endpoint, so its client is
+ * built on demand and only when a Bot actually runs on Grok.
+ */
+function xaiClient() {
+  return new OpenAI({ apiKey: env.xaiKey ?? '', baseURL: env.xaiBaseUrl, timeout: 300_000 });
+}
+
+
+/** Read an env var, falling back to the old name so older .env files keep working. */
+function envVar(name: string, legacy: string): string | undefined {
+  return process.env[name] ?? process.env[legacy];
+}
 
 const num = (v: string | undefined, d: number) => (v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : d);
 
 export const memoryConfig = {
   /** Compact when the history estimate passes this many characters (~4 chars/token). GUILD_COMPACT_TOKENS overrides. */
-  compactChars: process.env.GUILD_COMPACT_TOKENS ? num(process.env.GUILD_COMPACT_TOKENS, 75_000) * 4 : num(process.env.GUILD_COMPACT_CHARS, 300_000),
+  compactChars: envVar('GUILD_COMPACT_TOKENS', 'GROKBOT_COMPACT_TOKENS') ? num(envVar('GUILD_COMPACT_TOKENS', 'GROKBOT_COMPACT_TOKENS'), 75_000) * 4 : num(envVar('GUILD_COMPACT_CHARS', 'GROKBOT_COMPACT_CHARS'), 300_000),
   /** User turns kept verbatim after a compaction. */
-  keepTurns: num(process.env.GUILD_COMPACT_KEEP_TURNS, 4),
+  keepTurns: num(envVar('GUILD_COMPACT_KEEP_TURNS', 'GROKBOT_COMPACT_KEEP_TURNS'), 4),
   /** Minutes without a message before consolidation runs. */
-  consolidateIdleMin: num(process.env.GUILD_CONSOLIDATE_IDLE_MIN, 10),
-  consolidateSweepSec: num(process.env.GUILD_CONSOLIDATE_SWEEP_SEC, 60),
+  consolidateIdleMin: num(envVar('GUILD_CONSOLIDATE_IDLE_MIN', 'GROKBOT_CONSOLIDATE_IDLE_MIN'), 10),
+  consolidateSweepSec: num(envVar('GUILD_CONSOLIDATE_SWEEP_SEC', 'GROKBOT_CONSOLIDATE_SWEEP_SEC'), 60),
   /** 'auto' tries xAI /responses/compact then falls back to a summary; 'summary' skips xAI compaction. */
-  compactMethod: process.env.GUILD_COMPACT_METHOD === 'summary' ? 'summary' : 'auto',
+  compactMethod: envVar('GUILD_COMPACT_METHOD', 'GROKBOT_COMPACT_METHOD') === 'summary' ? 'summary' : 'auto',
   /** Character budget for the memory section of the system prompt. */
-  promptMemoryChars: num(process.env.GUILD_PROMPT_MEMORY_CHARS, 4000),
+  promptMemoryChars: num(envVar('GUILD_PROMPT_MEMORY_CHARS', 'GROKBOT_PROMPT_MEMORY_CHARS'), 4000),
 };
 
 // ---------------------------------------------------------------------------
@@ -153,21 +166,17 @@ export function renderTranscript(items: any[], maxChars = 200_000): string {
 }
 
 async function compactWithXai(old: any[]): Promise<any[]> {
-  const res: any = await xai.post('/responses/compact', { body: { model: env.xaiModel, input: old } });
+  const res: any = await xaiClient().post('/responses/compact', { body: { model: env.xaiModel, input: old } });
   const out = (res?.output ?? []) as any[];
   if (!out.length || !out.some((o) => o?.type === 'compaction' || o?.encrypted_content || o?.role)) throw new Error('compact returned no items');
   return out;
 }
 
-async function compactWithSummary(old: any[]): Promise<any[]> {
+async function compactWithSummary(old: any[], providerId?: string | null, model?: string | null): Promise<any[]> {
   const transcript = renderTranscript(old);
-  const res: any = await xai.responses.create({
-    model: env.xaiModel,
-    input: [{ role: 'system', content: SUMMARY_PROMPT }, { role: 'user', content: transcript }],
-    store: false,
-    reasoning: { effort: 'low' },
-  } as any);
-  const text = String(res.output_text ?? '').trim();
+  // Use whichever provider the Bot runs on, so compaction works on MiniMax and
+  // local models too, not only on Grok.
+  const text = await completeText({ providerId, model, system: SUMMARY_PROMPT, prompt: transcript });
   if (!text) throw new Error('summary was empty');
   // Earlier xAI compaction items can't be read back as text, so carry them over unchanged.
   const carried = old.filter((it) => it?.type === 'compaction');
@@ -203,14 +212,18 @@ export async function maybeCompact(botId: string, items: any[], opts: { force?: 
   const t0 = Date.now();
   let method = 'xai-compact';
   let replaced: any[];
+  const providerId = bot?.provider ?? env.llmProvider;
+  const model = bot?.model ?? null;
   try {
+    // Only Grok has a dedicated compaction endpoint; everyone else gets a summary.
     if (memoryConfig.compactMethod === 'summary') throw new Error('xAI compaction disabled by GUILD_COMPACT_METHOD=summary');
+    if (providerId && providerId !== 'xai') throw new Error(`provider ${providerId} has no compaction endpoint`);
     replaced = await compactWithXai(old);
   } catch (e: any) {
     console.warn(`[memory] compact via /responses/compact failed for ${botId}: ${e?.message ?? e}; falling back to a summary`);
     method = 'summary';
     try {
-      replaced = await compactWithSummary(old);
+      replaced = await compactWithSummary(old, providerId, model);
     } catch (e2: any) {
       console.error(`[memory] summary fallback failed for ${botId}: ${e2?.message ?? e2}`);
       compactCooldown.set(botId, now() + 10 * 60_000);
@@ -296,18 +309,18 @@ export async function consolidateBot(botId: string, opts: { upTo?: number } = {}
   if (transcript.length > 24_000) transcript = transcript.slice(-24_000);
 
   const existing = (db.prepare('SELECT text FROM memories WHERE bot_id=? ORDER BY created_at DESC LIMIT 200').all(botId) as any[]).map((m) => m.text as string);
-  const res: any = await xai.responses.create({
-    model: env.xaiModel,
-    input: [
-      { role: 'system', content: CONSOLIDATE_PROMPT },
-      { role: 'user', content: `EXISTING MEMORIES:\n${existing.length ? existing.map((t) => `- ${t}`).join('\n') : '(none)'}\n\nRECENT CONVERSATION:\n${transcript}` },
-    ],
-    text: { format: { type: 'json_schema', name: 'memories', schema: SCHEMA, strict: true } },
-    reasoning: { effort: 'low' },
-    store: false,
-  } as any);
+  // Consolidation runs on whichever provider the Bot uses, so it works off Grok too.
+  const raw = await completeText({
+    providerId: bot?.provider ?? env.llmProvider,
+    model: bot?.model ?? null,
+    system: `${CONSOLIDATE_PROMPT}\nReply with JSON only, of the form {"memories":[{"text":"..."}]}, and nothing else.`,
+    prompt: `EXISTING MEMORIES:\n${existing.length ? existing.map((t) => `- ${t}`).join('\n') : '(none)'}\n\nRECENT CONVERSATION:\n${transcript}`,
+  });
   let proposed: string[] = [];
-  try { proposed = (JSON.parse(String(res.output_text ?? '{}')).memories ?? []).map((m: any) => String(m.text ?? '').trim()).filter(Boolean); } catch { /* bad json → nothing */ }
+  try {
+    const json = raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1);
+    proposed = (JSON.parse(json).memories ?? []).map((m: any) => String(m.text ?? '').trim()).filter(Boolean);
+  } catch { /* bad json -> nothing */ }
 
   const added: string[] = [];
   let skipped = 0;

@@ -32,7 +32,16 @@ export interface ComputerDetails {
   hibernation: { idleMinutes: number; viewers: number; dryRun: boolean };
 }
 
-export type BotPatch = Partial<Pick<Bot, 'name' | 'label' | 'description' | 'instructions' | 'avatarShape' | 'avatarColor' | 'effort' | 'mode'>>;
+export type BotPatch = Partial<Pick<Bot, 'name' | 'label' | 'description' | 'instructions' | 'avatarShape' | 'avatarColor' | 'effort' | 'mode' | 'provider' | 'model'>>;
+
+/** A model provider this install can use, and the models it serves. */
+export interface ProviderInfo {
+  id: string;
+  label: string;
+  kind: string;
+  models: string[];
+  available: boolean;
+}
 
 export const configApi = {
   settings: (botId: string) => req<BotSettingsBundle>('GET', `/bots/${botId}/settings`),
@@ -66,5 +75,8 @@ export const configApi = {
   deletePolicy: (tool: string) => req<{ ok: true }>('DELETE', `/policies/${encodeURIComponent(tool)}`),
 
   connectedApps: () => req<{ connectedApps?: Toolkit[]; connected: string[] }>('GET', '/apps?limit=1'),
+
+  /** Which model providers are configured, and their models. */
+  providers: () => req<{ providers: ProviderInfo[]; default: string | null }>('GET', '/providers'),
   logout: () => req<{ ok: true }>('POST', '/auth/logout'),
 };

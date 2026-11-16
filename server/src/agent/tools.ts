@@ -10,6 +10,10 @@ import { createEventRoutine, deleteEventTrigger, describeEvent, listTriggerTypes
 import { setCheckins } from '../proactive.js';
 import { createSubagent, deleteSubagent, listSubagents } from './subagents.js';
 import { createRoom, postToRoom } from './rooms.js';
+import { localTools } from './local.js';
+import { teamTools } from './team.js';
+import { machineTools } from './machine-tools.js';
+import { cloudTools } from './cloud.js';
 import type { ActivityKind } from '../types.js';
 import { Cron } from 'croner';
 
@@ -36,6 +40,8 @@ interface ToolDef {
   parameters: Record<string, unknown>;
   activity: ActivityKind;
   label: string;
+  /** Ask the user before running this tool (used by tools that touch the machine). */
+  needsApproval?: boolean;
   impl: Impl;
 }
 
@@ -66,6 +72,14 @@ function botByName(userId: string, name: string) {
 }
 
 export const TOOLS: ToolDef[] = [
+  // Tools that act on the machine this server runs on.
+  ...localTools(),
+  // Team management for the Chief of Staff.
+  ...teamTools(),
+  // Work sent to the user's other computers.
+  ...machineTools(),
+  // Moving work between computers through the cloud folder.
+  ...cloudTools(),
   {
     name: 'computer_screenshot',
     description: "Take a screenshot of your own computer screen (a Linux desktop that only you use). Use this before acting on the screen.",
@@ -476,7 +490,16 @@ export function functionSchemas() {
 export type Decision = 'allow' | 'ask' | 'block';
 
 export function policyFor(userId: string, toolName: string, args: any): { decision: Decision; key: string; toolkit?: string; title: string } {
-  if (toolMap.has(toolName)) return { decision: 'allow', key: toolName, title: toolName };
+  const own = toolMap.get(toolName);
+  if (own) {
+    if (!own.needsApproval) return { decision: 'allow', key: toolName, title: toolName };
+    // Tools that touch the machine ask first, unless the user said otherwise.
+    const p = db.prepare('SELECT mode FROM policies WHERE user_id=? AND tool=?').get(userId, toolName) as any;
+    const mode = p?.mode ?? 'needs_approval';
+    if (mode === 'blocked') return { decision: 'block', key: toolName, title: own.label };
+    if (mode === 'needs_approval') return { decision: 'ask', key: toolName, title: own.label };
+    return { decision: 'allow', key: toolName, title: own.label };
+  }
   const slugs = innerToolSlugs(toolName, args);
   if (!slugs.length) return { decision: 'allow', key: toolName, title: toolName };
   let decision: Decision = 'allow';
