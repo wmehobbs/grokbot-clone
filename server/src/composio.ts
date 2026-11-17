@@ -16,6 +16,8 @@ function createClient() {
 
 let client: ReturnType<typeof createClient> | null = null;
 export function composio(): ReturnType<typeof createClient> {
+  // Never construct the SDK without a key: it logs a stack trace on every call.
+  if (!composioEnabled) throw new Error('Connected apps are not configured. Set COMPOSIO_API_KEY in .env.');
   if (!client) client = createClient();
   return client;
 }
@@ -64,6 +66,8 @@ export async function toolkitInfo(slug: string): Promise<CatalogItem | undefined
 // ---------- per-user connections ----------
 
 export async function connectedToolkits(userId: string): Promise<Set<string>> {
+  // Called on every turn to build the system prompt: stay quiet without a key.
+  if (!composioEnabled) return new Set();
   const r = await composio().connectedAccounts.list({ userIds: [userId], statuses: ['ACTIVE'] } as any);
   const items: any[] = (r as any).items ?? [];
   return new Set(items.map((i) => i.toolkit?.slug ?? i.toolkitSlug).filter(Boolean));
@@ -111,6 +115,9 @@ export async function startConnect(userId: string, toolkit: string, callbackUrl:
 
 /** OpenAI-Responses-format function tools for this user's Composio session (meta tools). */
 export async function composioTools(userId: string): Promise<any[]> {
+  // Without a key there are no connected-app tools; stay quiet rather than
+  // warning on every turn.
+  if (!composioEnabled) return [];
   try {
     const session = await sessionFor(userId);
     const tools = await session.tools();
